@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Aperture,
   ArrowUpRight,
@@ -36,6 +36,128 @@ export default function Home() {
   const [backgroundUrl, setBackgroundUrl] = useState("");
   const [quality, setQuality] = useState("1080p");
   const [uploadError, setUploadError] = useState("");
+  const [processing, setProcessing] = useState(false);
+  const [processingStage, setProcessingStage] = useState("idle");
+  const [progress, setProgress] = useState(0);
+  const [processedFrames, setProcessedFrames] = useState(0);
+  const [totalFrames, setTotalFrames] = useState(0);
+  const [outputUrl, setOutputUrl] = useState("");
+  const [processingError, setProcessingError] = useState("");
+  const [jobId, setJobId] = useState("");
+
+  const apiUrl = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  const requestJson = async (url: string, options?: RequestInit) => {
+    const response = await fetch(url, options);
+    const text = await response.text();
+
+    let data: Record<string, any> = {};
+    try {
+      data = JSON.parse(text);
+    } catch {
+      throw new Error(
+        `Unexpected API response (HTTP ${response.status}). Check backend URL and Codespaces port access.`
+      );
+    }
+
+    if (!response.ok) {
+      throw new Error(
+        typeof data.detail === "string"
+          ? data.detail
+          : `API request failed (HTTP ${response.status})`
+      );
+    }
+
+    return data;
+  };
+
+  const uploadAsset = async (file: File, endpoint: string) => {
+    const form = new FormData();
+    form.append("file", file);
+
+    return requestJson(`${apiUrl}${endpoint}`, {
+      method: "POST",
+      body: form,
+    });
+  };
+
+  const handleExport = async () => {
+    if (!video || !background || processing) return;
+
+    if (!apiUrl) {
+      setProcessingError("NEXT_PUBLIC_API_URL is missing in .env.local");
+      return;
+    }
+
+    setProcessing(true);
+    setProcessingError("");
+    setUploadError("");
+    setOutputUrl("");
+    setJobId("");
+    setProgress(0);
+    setProcessedFrames(0);
+    setTotalFrames(0);
+
+    try {
+      setProcessingStage("Uploading video");
+      const uploadedVideo = await uploadAsset(video, "/api/videos/upload");
+
+      setProcessingStage("Uploading background");
+      const uploadedBackground = await uploadAsset(
+        background,
+        "/api/backgrounds/upload"
+      );
+
+      setProcessingStage("Starting AI processing");
+      const started = await requestJson(`${apiUrl}/api/process`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          video_id: uploadedVideo.video_id,
+          background_id: uploadedBackground.background_id,
+        }),
+      });
+
+      setJobId(started.job_id);
+      setProcessingStage("Processing video");
+
+      while (true) {
+        const job = await requestJson(
+          `${apiUrl}/api/process/${started.job_id}`,
+          { cache: "no-store" }
+        );
+
+        setProgress(Number(job.progress || 0));
+        setProcessedFrames(Number(job.processed_frames || 0));
+        setTotalFrames(Number(job.total_frames || 0));
+
+        if (job.status === "completed") {
+          setProgress(100);
+          setProcessingStage("Completed");
+          setOutputUrl(
+            `${apiUrl}${job.download_url || `/api/download/${started.job_id}`}`
+          );
+          break;
+        }
+
+        if (job.status === "failed") {
+          throw new Error(job.error || "AI processing failed.");
+        }
+
+        await sleep(2000);
+      }
+    } catch (error) {
+      setProcessingStage("Failed");
+      setProcessingError(
+        error instanceof Error ? error.message : "Something went wrong."
+      );
+    } finally {
+      setProcessing(false);
+    }
+  };
 
   const formatTime = (seconds: number) => {
     const minutes = Math.floor(seconds / 60);
@@ -47,6 +169,8 @@ export default function Home() {
     if (!file) return;
 
     setUploadError("");
+    setOutputUrl("");
+    setProcessingError("");
 
     if (!file.type.startsWith("video/")) {
       setUploadError("Please select a valid video file.");
@@ -105,12 +229,15 @@ export default function Home() {
 
     setBackground(file);
     setUploadError("");
+    setOutputUrl("");
+    setProcessingError("");
   };
 
   const removeVideo = () => {
     if (videoUrl) URL.revokeObjectURL(videoUrl);
     setVideo(null);
     setVideoUrl("");
+    setOutputUrl("");
     setDuration(null);
     if (videoInput.current) videoInput.current.value = "";
   };
@@ -119,6 +246,7 @@ export default function Home() {
     if (backgroundUrl) URL.revokeObjectURL(backgroundUrl);
     setBackground(null);
     setBackgroundUrl("");
+    setOutputUrl("");
     if (imageInput.current) imageInput.current.value = "";
   };
 
@@ -336,7 +464,13 @@ export default function Home() {
                 </div>
                 <div className="ai-status">
                   <span className="status-dot muted" />
-                  <span>Waiting for video</span>
+                  <span>
+                    {processingStage === "idle"
+                      ? video && background
+                        ? "Ready to process"
+                        : "Waiting for video and background"
+                      : processingStage}
+                  </span>
                 </div>
                 <p className="ai-description">Our AI model will identify the person and separate them from the original background.</p>
                 <div className="feature-list">
@@ -344,6 +478,37 @@ export default function Home() {
                   <div><Check size={15} /> Fine edge matting</div>
                   <div><Check size={15} /> Frame consistency</div>
                 </div>
+                {(processing || outputUrl || processingError) && (
+                  <div style={{ marginTop: 18 }}>
+                    <div style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      marginBottom: 8,
+                      fontSize: 13
+                    }}>
+                      <span>{processingStage}</span>
+                      <strong>{progress}%</strong>
+                    </div>
+                    <div style={{
+                      height: 8,
+                      borderRadius: 8,
+                      background: "#293044",
+                      overflow: "hidden"
+                    }}>
+                      <div style={{
+                        height: "100%",
+                        width: `${progress}%`,
+                        background: "#8b5cf6",
+                        transition: "width 0.3s ease"
+                      }} />
+                    </div>
+                    {totalFrames > 0 && (
+                      <p style={{ marginTop: 8, fontSize: 12 }}>
+                        {processedFrames} / {totalFrames} frames processed
+                      </p>
+                    )}
+                  </div>
+                )}
                 <div className="model-info">
                   <span>AI MODEL</span>
                   <strong>Robust Video Matting</strong>
@@ -358,7 +523,13 @@ export default function Home() {
                 </div>
 
                 <label className="field-label" htmlFor="quality">OUTPUT RESOLUTION</label>
-                <select id="quality" value={quality} onChange={(e) => setQuality(e.target.value)}>
+                <select
+                  id="quality"
+                  value={quality}
+                  onChange={(e) => setQuality(e.target.value)}
+                  disabled
+                  title="Resolution selection will be enabled in a future update"
+                >
                   <option value="720p">HD · 720p</option>
                   <option value="1080p">Full HD · 1080p</option>
                   <option value="1440p">QHD · 1440p</option>
@@ -372,12 +543,47 @@ export default function Home() {
 
                 <button
                   className="export-button"
-                  disabled={!video || !background}
-                  onClick={() => alert("AI processing and export will be enabled after backend integration.")}
+                  disabled={!video || !background || processing}
+                  onClick={handleExport}
                 >
-                  <Sparkles size={17} /> Export video <ArrowUpRight size={16} />
+                  {processing ? (
+                    <><Loader2 size={17} className="animate-spin" /> Processing... {progress}%</>
+                  ) : (
+                    <><Sparkles size={17} /> Export video <ArrowUpRight size={16} /></>
+                  )}
                 </button>
-                <p className="export-note">AI processing and export will be available after backend integration.</p>
+                <p className="export-note">
+                  Output: MP4 (H.264), original video resolution.
+                </p>
+
+                {processingError && (
+                  <p style={{ color: "#f87171", marginTop: 12, fontSize: 13 }}>
+                    {processingError}
+                  </p>
+                )}
+
+                {outputUrl && (
+                  <div style={{ marginTop: 18 }}>
+                    <p style={{ marginBottom: 10, fontWeight: 600 }}>
+                      Your video is ready!
+                    </p>
+                    <a
+                      href={outputUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="export-button"
+                      style={{
+                        display: "flex",
+                        justifyContent: "center",
+                        alignItems: "center",
+                        gap: 8,
+                        textDecoration: "none"
+                      }}
+                    >
+                      <Download size={17} /> Download MP4
+                    </a>
+                  </div>
+                )}
               </div>
 
               <div className="tip-card">
@@ -389,6 +595,28 @@ export default function Home() {
               </div>
             </aside>
           </div>
+
+          {outputUrl && (
+            <section className="panel" style={{ padding: 22, marginTop: 24 }}>
+              <h3 style={{ marginBottom: 12 }}>Processed video preview</h3>
+              <video
+                key={outputUrl}
+                src={outputUrl}
+                controls
+                playsInline
+                style={{
+                  display: "block",
+                  width: "100%",
+                  maxHeight: 460,
+                  background: "#000",
+                  borderRadius: 12
+                }}
+              />
+              <p style={{ marginTop: 12, fontSize: 13, opacity: 0.7 }}>
+                Job ID: {jobId}
+              </p>
+            </section>
+          )}
 
           {uploadError && (
             <div className="error-message">
