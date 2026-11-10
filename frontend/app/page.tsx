@@ -25,6 +25,19 @@ import {
   X,
 } from "lucide-react";
 
+type Project = {
+  id: string;
+  video_filename: string;
+  background_filename: string;
+  status: string;
+  progress: number;
+  processed_frames: number;
+  total_frames: number;
+  error: string | null;
+  created_at: string;
+  download_url: string | null;
+};
+
 export default function Home() {
   const videoInput = useRef<HTMLInputElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -45,7 +58,52 @@ export default function Home() {
   const [processingError, setProcessingError] = useState("");
   const [jobId, setJobId] = useState("");
 
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(true);
+
   const apiUrl = (process.env.NEXT_PUBLIC_API_URL || "").replace(/\/$/, "");
+  useEffect(() => {
+  if (!apiUrl) {
+    setProjectsLoading(false);
+    return;
+  }
+
+  let active = true;
+
+  const loadProjects = async () => {
+    try {
+      const response = await fetch(`${apiUrl}/api/projects`, {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        throw new Error("Unable to load projects");
+      }
+
+      const data = await response.json();
+
+      if (active) {
+        setProjects(data.projects || []);
+        setProjectsLoading(false);
+      }
+    } catch (error) {
+      console.error("Project history error:", error);
+
+      if (active) {
+        setProjectsLoading(false);
+      }
+    }
+  };
+
+  loadProjects();
+
+  const interval = window.setInterval(loadProjects, 5000);
+
+  return () => {
+    active = false;
+    window.clearInterval(interval);
+  };
+}, [apiUrl]);
 
   const sleep = (ms: number) =>
     new Promise<void>((resolve) => setTimeout(resolve, ms));
@@ -624,17 +682,92 @@ export default function Home() {
             </div>
           )}
 
-          <section className="projects-section" id="projects">
-            <div className="projects-heading">
-              <div><h2>Recent projects</h2><p>Your video editing workspace.</p></div>
-              <span>0 PROJECTS</span>
+
+<section className="projects-section" id="projects">
+  <div className="projects-heading">
+    <div>
+      <h2>Recent projects</h2>
+      <p>Your video editing workspace.</p>
+    </div>
+    <span>{projects.length} PROJECTS</span>
+  </div>
+
+  {projectsLoading ? (
+    <div className="empty-projects">
+      <Loader2 size={23} className="animate-spin" />
+      <strong>Loading projects...</strong>
+    </div>
+  ) : projects.length === 0 ? (
+    <div className="empty-projects">
+      <div><FolderOpen size={25} /></div>
+      <strong>No projects yet</strong>
+      <span>Your completed projects will appear here.</span>
+    </div>
+  ) : (
+    <div className="project-list">
+      {projects.map((project) => (
+        <div className="project-card" key={project.id}>
+          <div className="project-card-info">
+            <div className="project-card-icon">
+              <Film size={20} />
             </div>
-            <div className="empty-projects">
-              <div><FolderOpen size={25} /></div>
-              <strong>No projects yet</strong>
-              <span>Your completed projects will appear here.</span>
+
+            <div className="project-card-details">
+              <strong>{project.video_filename}</strong>
+              <span>Background: {project.background_filename}</span>
+              <span>
+                {new Date(project.created_at).toLocaleString()}
+              </span>
             </div>
-          </section>
+          </div>
+
+          <div className="project-card-status">
+            <strong>
+              {project.status === "completed"
+                ? "Completed"
+                : project.status === "processing"
+                ? "Processing"
+                : project.status === "queued"
+                ? "Queued"
+                : project.status === "interrupted"
+                ? "Interrupted"
+                : "Failed"}
+            </strong>
+
+            {(project.status === "processing" ||
+              project.status === "queued") && (
+              <span>{project.progress}%</span>
+            )}
+
+            {project.status === "completed" && project.download_url && (
+              <a
+                href={`${apiUrl}${project.download_url}`}
+                className="project-download"
+              >
+                <Download size={14} /> Download
+              </a>
+            )}
+          </div>
+
+          {(project.status === "processing" ||
+            project.status === "queued") && (
+            <div className="project-progress">
+              <div style={{ width: `${project.progress}%` }} />
+            </div>
+          )}
+
+          {project.status === "failed" ||
+          project.status === "interrupted" ? (
+            <span className="project-error">
+              {project.error || "Processing could not be completed."}
+            </span>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  )}
+</section>
+
 
           <footer className="footer">
             <span>BACKGROUND STUDIO <span className="footer-dot">●</span> AI VIDEO EDITOR</span>
